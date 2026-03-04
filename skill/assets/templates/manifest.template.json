@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "project": {
+    "name": "{{PROJECT_NAME}}",
+    "rootPath": "{{ROOT_PATH}}",
+    "platform": "windows"
+  },
+  "terminal": {
+    "engine": "windows-terminal",
+    "reuseWindow": false
+  },
+  "apps": [],
+  "services": []
+}
