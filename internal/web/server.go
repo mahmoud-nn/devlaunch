@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
 	"strings"
@@ -117,6 +118,15 @@ func (s *Server) handleProjectAction(w http.ResponseWriter, r *http.Request) {
 		}
 		status, err := runtime.Start(target, options)
 		if err != nil {
+			var pending runtime.PendingDecisionsError
+			if errors.As(err, &pending) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"status":   "pending_decisions",
+					"action":   pending.Action,
+					"requests": pending.Requests,
+				})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -129,6 +139,15 @@ func (s *Server) handleProjectAction(w http.ResponseWriter, r *http.Request) {
 		}
 		status, err := runtime.Stop(target, options)
 		if err != nil {
+			var pending runtime.PendingDecisionsError
+			if errors.As(err, &pending) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"status":   "pending_decisions",
+					"action":   pending.Action,
+					"requests": pending.Requests,
+				})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -173,7 +192,11 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func decodeExecutionOptions(r *http.Request) (runtime.ExecutionOptions, error) {
 	if r.Body == nil || r.ContentLength == 0 {
-		return runtime.ExecutionOptions{Interactive: false}, nil
+		return runtime.ExecutionOptions{
+			Interactive:         false,
+			RequireAllDecisions: true,
+			Decisions:           map[string]bool{},
+		}, nil
 	}
 	defer r.Body.Close()
 	var options runtime.ExecutionOptions
@@ -181,6 +204,7 @@ func decodeExecutionOptions(r *http.Request) (runtime.ExecutionOptions, error) {
 		return runtime.ExecutionOptions{}, err
 	}
 	options.Interactive = false
+	options.RequireAllDecisions = true
 	if options.Decisions == nil {
 		options.Decisions = map[string]bool{}
 	}
@@ -195,14 +219,85 @@ const indexHTML = `<!doctype html>
   <title>devlaunch</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    async function act(id, action) {
-      const response = await fetch('/projects/' + id + '/' + action, { method: 'POST' });
+    function closeDecisionModal() {
+      const modal = document.getElementById('decision-modal');
+      modal.classList.add('hidden');
+      document.getElementById('decision-form').innerHTML = '';
+      delete modal.dataset.projectId;
+      delete modal.dataset.action;
+    }
+
+    function openDecisionModal(projectId, action, requests) {
+      const modal = document.getElementById('decision-modal');
+      const title = document.getElementById('decision-title');
+      const form = document.getElementById('decision-form');
+      const submit = document.getElementById('decision-submit');
+      title.textContent = action === 'start' ? 'Choose what to start' : 'Choose what to stop';
+      form.innerHTML = '';
+      requests.forEach(req => {
+        const wrapper = document.createElement('label');
+        wrapper.className = 'flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm';
+        const left = document.createElement('div');
+        left.className = 'pr-4';
+        left.innerHTML = '<div class="font-semibold text-slate-900">' + req.id + '</div><div class="text-xs text-slate-500">' + req.kind + '</div>';
+        const right = document.createElement('input');
+        right.type = 'checkbox';
+        right.name = req.id;
+        right.checked = !!req.default;
+        right.className = 'h-4 w-4';
+        wrapper.appendChild(left);
+        wrapper.appendChild(right);
+        form.appendChild(wrapper);
+      });
+      modal.dataset.projectId = projectId;
+      modal.dataset.action = action;
+      submit.textContent = action === 'start' ? 'Start selected' : 'Stop selected';
+      modal.classList.remove('hidden');
+    }
+
+    async function runAction(projectId, action, decisions) {
+      const response = await fetch('/projects/' + projectId + '/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decisions: decisions || {} })
+      });
+      if (response.status === 409) {
+        const payload = await response.json();
+        if (payload && payload.status === 'pending_decisions') {
+          openDecisionModal(projectId, action, payload.requests || []);
+          return;
+        }
+      }
       if (!response.ok) {
         const text = await response.text();
         alert(text);
         return;
       }
+      closeDecisionModal();
       window.location.reload();
+    }
+
+    async function act(id, action) {
+      if (action === 'open-folder') {
+        const response = await fetch('/projects/' + id + '/open-folder', { method: 'POST' });
+        if (!response.ok) {
+          const text = await response.text();
+          alert(text);
+        }
+        return;
+      }
+      await runAction(id, action, {});
+    }
+
+    async function submitDecisions(event) {
+      event.preventDefault();
+      const modal = document.getElementById('decision-modal');
+      const decisions = {};
+      const inputs = document.querySelectorAll('#decision-form input[type="checkbox"]');
+      inputs.forEach(input => {
+        decisions[input.name] = !!input.checked;
+      });
+      await runAction(modal.dataset.projectId, modal.dataset.action, decisions);
     }
   </script>
 </head>
@@ -238,5 +333,18 @@ const indexHTML = `<!doctype html>
       {{end}}
     </section>
   </main>
+  <div id="decision-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/40">
+    <div class="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+      <div class="mb-4">
+        <h3 id="decision-title" class="text-lg font-bold text-slate-900">Confirm action</h3>
+        <p class="text-sm text-slate-500">Select choices, then submit once.</p>
+      </div>
+      <form id="decision-form" class="space-y-2" onsubmit="submitDecisions(event)"></form>
+      <div class="mt-5 flex justify-end gap-2">
+        <button type="button" class="rounded-lg border border-slate-300 px-4 py-2 text-sm" onclick="closeDecisionModal()">Cancel</button>
+        <button id="decision-submit" type="submit" form="decision-form" class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Apply</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>`

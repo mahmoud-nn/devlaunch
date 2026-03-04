@@ -29,8 +29,26 @@ type ProjectTarget struct {
 }
 
 type ExecutionOptions struct {
-	Interactive bool            `json:"interactive"`
-	Decisions   map[string]bool `json:"decisions,omitempty"`
+	Interactive         bool            `json:"interactive"`
+	RequireAllDecisions bool            `json:"requireAllDecisions,omitempty"`
+	Decisions           map[string]bool `json:"decisions,omitempty"`
+}
+
+type DecisionRequest struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Action  string `json:"action"`
+	Prompt  string `json:"prompt"`
+	Default bool   `json:"default"`
+}
+
+type PendingDecisionsError struct {
+	Action   string            `json:"action"`
+	Requests []DecisionRequest `json:"requests"`
+}
+
+func (e PendingDecisionsError) Error() string {
+	return fmt.Sprintf("%s requires user decisions before execution", e.Action)
 }
 
 type ResourceStatus struct {
@@ -188,6 +206,12 @@ func Start(target ProjectTarget, options ExecutionOptions) (ProjectStatus, error
 	if err != nil {
 		return ProjectStatus{}, err
 	}
+	if options.RequireAllDecisions {
+		pending := collectPendingStartDecisions(appOrder, serviceOrder, ctx.state, options.Decisions)
+		if len(pending) > 0 {
+			return ProjectStatus{}, PendingDecisionsError{Action: "start", Requests: pending}
+		}
+	}
 
 	for _, app := range appOrder {
 		resource := ctx.state.Resources[app.ID]
@@ -263,6 +287,12 @@ func Stop(target ProjectTarget, options ExecutionOptions) (ProjectStatus, error)
 	ctx, err := loadProject(target)
 	if err != nil {
 		return ProjectStatus{}, err
+	}
+	if options.RequireAllDecisions {
+		pending := collectPendingStopDecisions(ctx.doc.Apps, ctx.doc.Services, ctx.state, options.Decisions)
+		if len(pending) > 0 {
+			return ProjectStatus{}, PendingDecisionsError{Action: "stop", Requests: pending}
+		}
 	}
 
 	for i := len(ctx.doc.Services) - 1; i >= 0; i-- {
@@ -828,6 +858,72 @@ func resolveAction(action, kind, id string, policy manifest.Policy, options Exec
 		return false, nil
 	}
 	return promptYesNo(fmt.Sprintf("%s %s %q now? [y/N]: ", strings.Title(action), kind, id))
+}
+
+func collectPendingStartDecisions(apps []manifest.App, services []manifest.Service, st state.State, decisions map[string]bool) []DecisionRequest {
+	requests := make([]DecisionRequest, 0)
+	for _, app := range apps {
+		resource := st.Resources[app.ID]
+		if resource.Status == state.StatusRunning {
+			continue
+		}
+		if app.StartPolicy.DefaultAction == "ask" && !hasDecision(decisions, app.ID) {
+			requests = append(requests, decisionRequest("app", "start", app.ID))
+		}
+	}
+	for _, service := range services {
+		resource := st.Resources[service.ID]
+		if resource.Status == state.StatusRunning {
+			continue
+		}
+		if service.StartPolicy.DefaultAction == "ask" && !hasDecision(decisions, service.ID) {
+			requests = append(requests, decisionRequest("service", "start", service.ID))
+		}
+	}
+	return requests
+}
+
+func collectPendingStopDecisions(apps []manifest.App, services []manifest.Service, st state.State, decisions map[string]bool) []DecisionRequest {
+	requests := make([]DecisionRequest, 0)
+	for i := len(services) - 1; i >= 0; i-- {
+		service := services[i]
+		resource := st.Resources[service.ID]
+		if resource.Status == state.StatusStopped {
+			continue
+		}
+		if service.StopPolicy.DefaultAction == "ask" && !hasDecision(decisions, service.ID) {
+			requests = append(requests, decisionRequest("service", "stop", service.ID))
+		}
+	}
+	for i := len(apps) - 1; i >= 0; i-- {
+		app := apps[i]
+		resource := st.Resources[app.ID]
+		if resource.Status == state.StatusStopped {
+			continue
+		}
+		if app.StopPolicy.DefaultAction == "ask" && !hasDecision(decisions, app.ID) {
+			requests = append(requests, decisionRequest("app", "stop", app.ID))
+		}
+	}
+	return requests
+}
+
+func hasDecision(decisions map[string]bool, id string) bool {
+	if decisions == nil {
+		return false
+	}
+	_, ok := decisions[id]
+	return ok
+}
+
+func decisionRequest(kind, action, id string) DecisionRequest {
+	return DecisionRequest{
+		ID:      id,
+		Kind:    kind,
+		Action:  action,
+		Prompt:  fmt.Sprintf("%s %s %q?", strings.Title(action), kind, id),
+		Default: false,
+	}
 }
 
 func normalizedDecision(action string) (bool, bool) {
