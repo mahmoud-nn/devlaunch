@@ -36,7 +36,7 @@ devlaunch
 ├── internal/web           local SSR web UI + HTTP handlers
 ├── internal/windows       Go wrappers over PowerShell scripts
 ├── scripts/ps1            native Windows execution scripts
-├── skill                  embedded skill source
+├── skills/devlaunch       repo-hosted skill source
 └── devlaunch-specs        product and implementation specs
 ```
 
