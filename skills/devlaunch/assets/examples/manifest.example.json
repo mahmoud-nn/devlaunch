@@ -13,22 +13,40 @@
     {
       "id": "docker-desktop",
       "kind": "desktop-app",
-      "enabled": true,
       "dependsOn": [],
       "launch": {
         "strategy": "executable",
         "path": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
       },
-      "readiness": {
-        "type": "command",
-        "command": "docker info",
-        "retry": {
-          "maxAttempts": 60,
-          "delayMs": 2000
-        }
+      "startPolicy": {
+        "defaultAction": "always"
       },
       "stopPolicy": {
         "defaultAction": "ask"
+      },
+      "checks": {
+        "start": {
+          "mode": "all",
+          "items": [
+            {
+              "type": "command",
+              "command": "docker info",
+              "retry": {
+                "maxAttempts": 60,
+                "delayMs": 2000
+              }
+            }
+          ]
+        },
+        "status": {
+          "mode": "all",
+          "items": [
+            {
+              "type": "command",
+              "command": "docker info"
+            }
+          ]
+        }
       }
     }
   ],
@@ -43,16 +61,36 @@
       "dependsOn": [
         "docker-desktop"
       ],
-      "readiness": {
-        "type": "command",
-        "command": "docker compose ps"
-      },
-      "startWhen": {
-        "delayMs": 0
+      "startPolicy": {
+        "defaultAction": "always"
       },
       "stopPolicy": {
-        "defaultAction": "ask",
+        "defaultAction": "always",
         "command": "docker compose down"
+      },
+      "checks": {
+        "start": {
+          "mode": "all",
+          "items": [
+            {
+              "type": "command",
+              "command": "docker compose ps",
+              "retry": {
+                "maxAttempts": 10,
+                "delayMs": 1000
+              }
+            }
+          ]
+        },
+        "status": {
+          "mode": "all",
+          "items": [
+            {
+              "type": "command",
+              "command": "docker compose ps"
+            }
+          ]
+        }
       }
     },
     {
@@ -60,20 +98,41 @@
       "kind": "project-command",
       "interactive": true,
       "tabName": "frontend",
-      "workingDirectory": "C:\\PROJETS\\lebonplan",
-      "command": "pnpm dev",
+      "workingDirectory": "C:\\PROJETS\\lebonplan\\lebonplan-frontend",
+      "command": "bun dev:full",
       "dependsOn": [
         "docker-compose"
       ],
-      "readiness": {
-        "type": "fixed-delay",
-        "delayMs": 2000
-      },
-      "startWhen": {
-        "delayMs": 0
+      "startPolicy": {
+        "defaultAction": "ask"
       },
       "stopPolicy": {
-        "defaultAction": "ask"
+        "defaultAction": "always"
+      },
+      "checks": {
+        "start": {
+          "mode": "all",
+          "items": [
+            {
+              "type": "fixed-delay",
+              "delayMs": 5000
+            }
+          ]
+        },
+        "status": {
+          "mode": "any",
+          "items": [
+            {
+              "type": "process",
+              "name": "node"
+            },
+            {
+              "type": "http",
+              "url": "http://127.0.0.1:3000/health",
+              "expectStatus": [200]
+            }
+          ]
+        }
       }
     }
   ]

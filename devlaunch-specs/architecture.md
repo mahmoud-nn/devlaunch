@@ -30,7 +30,7 @@ Responsable de:
 - lire les states
 - réconcilier l'état avec la réalité système
 - lancer les `apps`
-- attendre la readiness
+- attendre les `checks.start`
 - lancer les `services`
 - stopper les `services`
 - demander quoi faire des `apps`

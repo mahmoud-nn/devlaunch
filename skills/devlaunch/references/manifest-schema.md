@@ -1,5 +1,20 @@
 # Devlaunch Manifest Reference
 
-- Top-level keys: `version`, `project`, `terminal`, `apps`, `services`
-- Only `apps` and `services` may describe runtime resources
-- `docker compose up -d` must be modeled as a `service`
+Normative source:
+
+- `references/manifest.v1.schema.json`
+
+Rules:
+
+- `version` must be `1`
+- top-level keys are only `version`, `project`, `terminal`, `apps`, `services`
+- every `app` and `service` must declare:
+  - `startPolicy`
+  - `stopPolicy`
+  - `checks.start`
+  - `checks.status`
+- every check group must declare `mode`
+- unsupported keys are invalid
+- missing required keys are invalid
+
+This Markdown is a human guide only. The JSON schema is the strict contract.

@@ -95,7 +95,7 @@ Le runtime doit savoir:
 - lire `state.local.json`
 - réconcilier le state avec la réalité système
 - lancer les `apps`
-- attendre leur readiness réelle
+- attendre leurs `checks.start`
 - lancer les `services` dans l'ordre
 - ouvrir des onglets Windows Terminal pour les services interactifs
 - lancer les services non interactifs sans onglet persistant si nécessaire
@@ -194,7 +194,7 @@ Pour `C:\PROJETS\lebonplan`, le manifest cible doit au minimum pouvoir représen
 Ordre logique:
 
 1. vérifier/lancer Docker Desktop
-2. attendre readiness Docker
+2. attendre les checks de démarrage Docker
 3. lancer `docker compose up -d`
 4. lancer les `pnpm dev:{service}`
 5. lancer le frontend

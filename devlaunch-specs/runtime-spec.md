@@ -4,76 +4,76 @@
 
 Le runtime exécute les vrais flux:
 
+- `validate`
 - `start`
 - `stop`
 - `status`
 - `register`
 - `reconcile`
 
-## Implémentation
+## Contrat de validation
 
-Le runtime doit être implémenté en `Go`.
-
-Le même binaire Go peut:
-
-- exécuter les commandes CLI
-- héberger la web UI locale
-- exposer l'API HTTP locale
-
-## Responsabilités
-
-### `start`
-
-Ordre:
+Avant toute action métier:
 
 1. lire `manifest.json`
-2. lire `state.local.json`
-3. réconcilier
-4. lancer les `apps`
-5. attendre la readiness des `apps`
-6. lancer les `services` dans l'ordre topologique
-7. ouvrir Windows Terminal pour les services interactifs
-8. mettre à jour state + registry
+2. valider strictement contre `manifest.v1.schema.json`
+3. lire `state.local.json` si présent
+4. valider strictement contre `state.v1.schema.json`
+5. seulement ensuite continuer
 
-### `stop`
+Si le manifest est invalide:
+
+- l'action échoue
+
+Si le state est invalide:
+
+- il est ignoré
+- un state vide valide est reconstruit en mémoire
+- un warning est renvoyé
+
+## `start`
 
 Ordre:
 
-1. lire manifest + state
-2. réconcilier
-3. arrêter les `services`
-4. demander explicitement quoi faire des `apps`
+1. valider les fichiers
+2. réconcilier le state avec la réalité système
+3. résoudre `startPolicy`
+4. lancer les `apps`
+5. attendre `checks.start`
+6. lancer les `services` dans l'ordre topologique
+7. attendre `checks.start`
+8. mettre à jour state + registry
+
+## `stop`
+
+Ordre:
+
+1. valider les fichiers
+2. réconcilier le state avec la réalité système
+3. arrêter les `services` selon `stopPolicy`
+4. demander explicitement quoi faire des `apps` selon `stopPolicy`
 5. mettre à jour state + registry
 
-### `status`
+## `status`
 
 Le runtime doit renvoyer:
 
 - état calculé des ressources
-- divergence éventuelle avec le state
-- dernier démarrage connu
+- état mémorisé dans le state
+- divergence éventuelle
+- mécanisme d'observation utilisé
+- warnings éventuels
 
-### `register`
+## Observation réelle
 
-Le runtime ajoute ou met à jour le projet dans le registry global.
+Le runtime ne doit pas déduire l'état d'une ressource uniquement depuis le state.
 
-### `reconcile`
+Il doit observer la réalité avec:
 
-Le runtime doit supporter:
+- `checks.status`
+- le PID mémorisé si encore crédible
 
-- state absent
-- state invalide
-- tabs fermés à la main
-- arrêt brutal machine
-
-## Readiness v1
-
-Supporter:
-
-- `command`
-- `port`
-- `process`
-- `fixed-delay`
+`fixed-delay` peut servir au démarrage mais ne peut pas suffire à conclure `running` en `status`.
 
 ## API locale minimale
 
@@ -82,24 +82,13 @@ Supporter:
 - `POST /projects/:id/start`
 - `POST /projects/:id/stop`
 - `POST /projects/:id/open-folder`
-- `POST /projects/register`
 
-Cette API est locale, sur `localhost`, et sert surtout la web UI.
+Les appels `start` et `stop` acceptent des options d'exécution.
 
-## Process interactifs
-
-Un `service` interactif:
-
-- est lancé dans Windows Terminal
-- avec un nom d'onglet
-- dans le bon répertoire
-
-Un `service` non interactif:
-
-- peut être lancé sans conserver un onglet
+Par défaut la web UI utilise le mode non interactif et peut fournir plus tard des décisions explicites pour les ressources en `ask`.
 
 ## Principes
 
-- le runtime ne doit pas dépendre de la web UI
-- la CLI et la web UI utilisent le même runtime
-- la web UI est une couche de confort; la CLI doit exposer les mêmes actions métier
+- le runtime ne dépend pas de la web UI
+- la CLI et la web UI appellent le même runtime
+- la différence CLI/UI passe uniquement par les options d'exécution

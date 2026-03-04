@@ -2,183 +2,22 @@
 
 ## Chemin
 
-Chaque projet configuré possède:
-
 - `<repo>\.devlaunch\manifest.json`
 
 ## Principe
 
-Le manifest décrit comment lancer un projet.
+Le manifest v1 décrit le contrat strict de lancement du projet.
 
-Il ne contient que deux collections:
+Il ne contient que:
 
 - `apps`
 - `services`
 
-## Définition
+La référence normative est:
 
-### `apps`
+- `skills/devlaunch/references/manifest.v1.schema.json`
 
-Ressources externes au projet.
-
-Exemples:
-
-- Docker Desktop
-- Laragon
-- Cursor
-- IntelliJ
-- Android Studio
-
-### `services`
-
-Commandes propres au projet.
-
-Exemples:
-
-- `docker compose up -d`
-- `pnpm dev:payments`
-- `bun dev:full`
-- worker
-- backend
-- frontend
-
-## Dépendances
-
-Règles:
-
-- une `app` peut dépendre d'une `app`
-- un `service` peut dépendre d'une `app`
-- un `service` peut dépendre d'un `service`
-
-## Schéma conceptuel
-
-```json
-{
-  "version": 1,
-  "project": {
-    "name": "lebonplan",
-    "rootPath": "C:\\PROJETS\\lebonplan",
-    "platform": "windows"
-  },
-  "terminal": {
-    "engine": "windows-terminal",
-    "reuseWindow": false
-  },
-  "apps": [],
-  "services": []
-}
-```
-
-## Schéma `app`
-
-```json
-{
-  "id": "docker-desktop",
-  "kind": "desktop-app",
-  "enabled": true,
-  "dependsOn": [],
-  "launch": {
-    "strategy": "executable",
-    "path": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
-  },
-  "readiness": {
-    "type": "command",
-    "command": "docker info",
-    "retry": {
-      "maxAttempts": 60,
-      "delayMs": 2000
-    }
-  },
-  "stopPolicy": {
-    "defaultAction": "ask"
-  }
-}
-```
-
-## Schéma `service`
-
-```json
-{
-  "id": "docker-compose",
-  "kind": "project-command",
-  "interactive": false,
-  "tabName": null,
-  "workingDirectory": "C:\\PROJETS\\lebonplan",
-  "command": "docker compose up -d",
-  "dependsOn": ["docker-desktop"],
-  "readiness": {
-    "type": "command",
-    "command": "docker compose ps"
-  },
-  "startWhen": {
-    "delayMs": 0
-  },
-  "stopPolicy": {
-    "defaultAction": "ask",
-    "command": "docker compose down"
-  }
-}
-```
-
-## Champs attendus
-
-### `project`
-
-- `name`
-- `rootPath`
-- `platform`
-
-### `terminal`
-
-- `engine`
-- `reuseWindow`
-
-### `apps[*]`
-
-- `id`
-- `kind`
-- `enabled`
-- `dependsOn`
-- `launch`
-- `readiness`
-- `stopPolicy`
-
-### `services[*]`
-
-- `id`
-- `kind`
-- `interactive`
-- `tabName`
-- `workingDirectory`
-- `command`
-- `dependsOn`
-- `readiness`
-- `startWhen`
-- `stopPolicy`
-
-## Règles de validation
-
-- `id` unique globalement dans le manifest
-- `dependsOn` doit référencer des ids existants
-- pas de cycle de dépendance
-- `docker compose` reste un `service`
-- un `service` interactif a normalement un `tabName`
-- un `service` non interactif peut avoir `tabName = null`
-
-## Types de readiness v1
-
-- `command`
-- `port`
-- `process`
-- `fixed-delay`
-
-## Types de stop policy v1
-
-- `ask`
-- `never`
-- `always`
-
-## Exemple minimal
+## Top-level
 
 ```json
 {
@@ -192,50 +31,133 @@ Règles:
     "engine": "windows-terminal",
     "reuseWindow": false
   },
-  "apps": [
-    {
-      "id": "docker-desktop",
-      "kind": "desktop-app",
-      "enabled": true,
-      "dependsOn": [],
-      "launch": {
-        "strategy": "executable",
-        "path": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
-      },
-      "readiness": {
-        "type": "command",
-        "command": "docker info",
-        "retry": {
-          "maxAttempts": 60,
-          "delayMs": 2000
-        }
-      },
-      "stopPolicy": {
-        "defaultAction": "ask"
-      }
-    }
-  ],
-  "services": [
-    {
-      "id": "docker-compose",
-      "kind": "project-command",
-      "interactive": false,
-      "tabName": null,
-      "workingDirectory": "C:\\PROJETS\\demo",
-      "command": "docker compose up -d",
-      "dependsOn": ["docker-desktop"],
-      "readiness": {
-        "type": "command",
-        "command": "docker compose ps"
-      },
-      "startWhen": {
-        "delayMs": 0
-      },
-      "stopPolicy": {
-        "defaultAction": "ask",
-        "command": "docker compose down"
-      }
-    }
-  ]
+  "apps": [],
+  "services": []
 }
 ```
+
+## `app`
+
+```json
+{
+  "id": "docker-desktop",
+  "kind": "desktop-app",
+  "dependsOn": [],
+  "launch": {
+    "strategy": "executable",
+    "path": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
+  },
+  "startPolicy": {
+    "defaultAction": "always"
+  },
+  "stopPolicy": {
+    "defaultAction": "ask"
+  },
+  "checks": {
+    "start": {
+      "mode": "all",
+      "items": [
+        {
+          "type": "command",
+          "command": "docker info",
+          "retry": {
+            "maxAttempts": 60,
+            "delayMs": 2000
+          }
+        }
+      ]
+    },
+    "status": {
+      "mode": "all",
+      "items": [
+        {
+          "type": "command",
+          "command": "docker info"
+        }
+      ]
+    }
+  }
+}
+```
+
+## `service`
+
+```json
+{
+  "id": "frontend",
+  "kind": "project-command",
+  "interactive": true,
+  "tabName": "frontend",
+  "workingDirectory": "C:\\PROJETS\\demo",
+  "command": "pnpm dev",
+  "dependsOn": ["docker-compose"],
+  "startPolicy": {
+    "defaultAction": "ask"
+  },
+  "stopPolicy": {
+    "defaultAction": "always"
+  },
+  "checks": {
+    "start": {
+      "mode": "all",
+      "items": [
+        {
+          "type": "fixed-delay",
+          "delayMs": 2000
+        }
+      ]
+    },
+    "status": {
+      "mode": "any",
+      "items": [
+        {
+          "type": "process",
+          "name": "node"
+        }
+      ]
+    }
+  }
+}
+```
+
+## Policies v1
+
+- `startPolicy.defaultAction`
+- `stopPolicy.defaultAction`
+
+Valeurs supportées:
+
+- `always`
+- `ask`
+- `never`
+
+## Checks v1
+
+Chaque groupe de checks doit déclarer:
+
+- `mode`
+- `items`
+
+Modes supportés:
+
+- `all`
+- `any`
+
+Types de check supportés:
+
+- `command`
+- `port`
+- `process`
+- `http`
+- `fixed-delay`
+
+## Règles de validation métier
+
+- `id` unique globalement dans le manifest
+- `dependsOn` doit référencer des ids existants
+- pas de cycle de dépendance
+- une `app` peut dépendre uniquement d'une `app`
+- un `service` peut dépendre d'une `app` ou d'un `service`
+- un `service` interactif doit avoir un `tabName`
+- `checks.status` ne peut pas être composé uniquement de `fixed-delay`
+- aucun champ hors schéma n'est supporté

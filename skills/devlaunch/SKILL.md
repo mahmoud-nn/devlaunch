@@ -1,26 +1,51 @@
 ---
 name: devlaunch
-description: Configure a repository for devlaunch by generating manifest and state files that match the runtime contract.
+description: Configure a repository for devlaunch by generating manifest and state files that match the strict runtime contract.
 ---
 
 # Devlaunch Skill
 
-Use this skill when a repository must be initialized for `devlaunch`.
+Use this skill when a repository must be initialized or updated for `devlaunch`.
+
+## Source Of Truth
+
+The only normative references are:
+
+- `references/manifest.v1.schema.json`
+- `references/state.v1.schema.json`
+
+Templates and examples are only helpers. They are not the contract.
+
+Every generated or edited `.devlaunch/manifest.json` and `.devlaunch/state.local.json` must match the strict v1 schemas exactly.
+
+If a field is unknown, unsupported, or missing, treat the document as invalid and say so before proceeding.
+
+## Existing Repository Rule
+
+If the skill is called again on a repository that already contains `.devlaunch` files, do not guess.
+
+Ask which of these three actions the developer wants:
+
+1. Recreate from scratch
+2. Adapt the existing files to the latest supported manifest/state contract
+3. Do nothing
+
+Do not silently overwrite an existing manifest or state file.
 
 ## Workflow
-
-Always start with the developer, not with repo guessing.
 
 Order is mandatory:
 
 1. Ask the developer which tools they use to work on the project.
 2. Ask how they usually launch the project day to day.
 3. Ask which tools should stay open or be treated as optional.
-4. Only after that, inspect the repository to confirm and complete the picture.
-5. If the repo is not initialized yet, run `devlaunch init` first to create the baseline files.
-6. Then adapt `.devlaunch/manifest.json` and `.devlaunch/state.local.json`.
-7. Never generate custom config first and run `devlaunch init` after.
-8. Register the project through `devlaunch init` or the runtime.
+4. If `.devlaunch` already exists, ask whether to recreate, adapt, or leave it unchanged.
+5. Inspect the repository to confirm and complete the picture.
+6. If the repo is not initialized yet, run `devlaunch init` first so the baseline files are created safely.
+7. Adapt `.devlaunch/manifest.json`.
+8. Adapt `.devlaunch/state.local.json` only when needed.
+9. Validate both files against the strict v1 schema before considering the task complete.
+10. Register the project through `devlaunch init` or the runtime.
 
 ## Questions To Ask First
 
@@ -34,41 +59,18 @@ Ask explicitly:
 
 Do not skip these questions unless the developer already answered them in the current conversation.
 
-## Then Inspect The Repo
+## Use The Local Assets
 
-After the developer answers:
+Use these assets intentionally:
 
-1. Inspect the repository.
-2. Detect likely local developer commands and external apps.
-3. Compare repo evidence with the developer's answers.
-4. If there is a mismatch, prefer asking a follow-up question rather than guessing.
+1. `references/`
+   Read the strict schema references first.
 
-## Use The Local Skill Assets
+2. `assets/templates/`
+   Use them only as a starting shape for new files.
 
-This skill includes local supporting files that must be used explicitly.
-
-Use them with this intent:
-
-1. `assets/templates/`
-   Use these as the generation base for new config files.
-
-2. `assets/examples/`
-   Use these to understand what a realistic final manifest or state file should look like.
-
-3. `references/`
-   Use these to confirm schema expectations and runtime constraints.
-
-Do not rely only on memory when these files are available.
-Check the local assets before generating the final output.
-
-## Goals
-
-1. Capture the real developer workflow first.
-2. Confirm it against the repository.
-3. Run `devlaunch init` first when `.devlaunch` is missing.
-4. Adapt `.devlaunch/manifest.json`.
-5. Adapt `.devlaunch/state.local.json`.
-6. Register the project through `devlaunch init` or the runtime.
+3. `assets/examples/`
+   Use them only as examples of valid files.
 
 ## Constraints
 
@@ -76,6 +78,8 @@ Check the local assets before generating the final output.
 - `docker compose up -d` must be modeled as a `service`.
 - The target platform is Windows.
 - The shell is PowerShell.
-- Keep the manifest aligned with the runtime schema.
-- Prefer explicit developer answers over inference when defining startup flow.
-- `devlaunch init` must be treated as safe on existing projects and must not silently destroy existing `.devlaunch` files.
+- `startPolicy` and `stopPolicy` are explicit per resource.
+- `checks.start` and `checks.status` are explicit per resource.
+- `checks.*.mode` must always be present.
+- `devlaunch init` must be safe on existing projects.
+- Never produce fields outside the supported v1 schema.
