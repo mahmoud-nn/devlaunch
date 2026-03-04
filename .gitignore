@@ -1,0 +1,16 @@
+node_modules
+pnpm-lock.yaml
+.env
+.dist
+build
+coverage
+.temp
+*.log
+data/runtime/
+**/dist
+**/.turbo
+**/.cache
+bin/
+devlaunch.exe
+.gocache/
+.gomodcache/
