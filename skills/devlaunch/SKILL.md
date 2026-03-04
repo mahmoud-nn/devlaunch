@@ -42,6 +42,24 @@ After the developer answers:
 3. Compare repo evidence with the developer's answers.
 4. If there is a mismatch, prefer asking a follow-up question rather than guessing.
 
+## Use The Local Skill Assets
+
+This skill includes local supporting files that must be used explicitly.
+
+Use them with this intent:
+
+1. `assets/templates/`
+   Use these as the generation base for new config files.
+
+2. `assets/examples/`
+   Use these to understand what a realistic final manifest or state file should look like.
+
+3. `references/`
+   Use these to confirm schema expectations and runtime constraints.
+
+Do not rely only on memory when these files are available.
+Check the local assets before generating the final output.
+
 ## Goals
 
 1. Capture the real developer workflow first.

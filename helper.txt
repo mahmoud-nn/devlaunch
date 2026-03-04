@@ -1,0 +1,5 @@
+go mod tidy
+go mod download
+
+go build -o .\bin\devlaunch.exe .\cmd\devlaunch
+go install .\cmd\devlaunch

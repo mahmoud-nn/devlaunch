@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "project": {
+    "name": "lebonplan",
+    "rootPath": "C:\\PROJETS\\lebonplan",
+    "platform": "windows"
+  },
+  "terminal": {
+    "engine": "windows-terminal",
+    "reuseWindow": false
+  },
+  "apps": [
+    {
+      "id": "docker-desktop",
+      "kind": "desktop-app",
+      "enabled": true,
+      "dependsOn": [],
+      "launch": {
+        "strategy": "executable",
+        "path": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
+      },
+      "readiness": {
+        "type": "command",
+        "command": "docker info",
+        "retry": {
+          "maxAttempts": 60,
+          "delayMs": 2000
+        }
+      },
+      "stopPolicy": {
+        "defaultAction": "ask"
+      }
+    }
+  ],
+  "services": [
+    {
+      "id": "docker-compose",
+      "kind": "project-command",
+      "interactive": false,
+      "tabName": null,
+      "workingDirectory": "C:\\PROJETS\\lebonplan",
+      "command": "docker compose up -d",
+      "dependsOn": [
+        "docker-desktop"
+      ],
+      "readiness": {
+        "type": "command",
+        "command": "docker compose ps"
+      },
+      "startWhen": {
+        "delayMs": 0
+      },
+      "stopPolicy": {
+        "defaultAction": "ask",
+        "command": "docker compose down"
+      }
+    },
+    {
+      "id": "frontend",
+      "kind": "project-command",
+      "interactive": true,
+      "tabName": "frontend",
+      "workingDirectory": "C:\\PROJETS\\lebonplan",
+      "command": "pnpm dev",
+      "dependsOn": [
+        "docker-compose"
+      ],
+      "readiness": {
+        "type": "fixed-delay",
+        "delayMs": 2000
+      },
+      "startWhen": {
+        "delayMs": 0
+      },
+      "stopPolicy": {
+        "defaultAction": "ask"
+      }
+    }
+  ]
+}
