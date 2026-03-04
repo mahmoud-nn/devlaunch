@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mahmoud-nn/devlaunch/internal/registry"
 	"github.com/mahmoud-nn/devlaunch/internal/runtime"
+	"github.com/mahmoud-nn/devlaunch/internal/schema"
 	"github.com/mahmoud-nn/devlaunch/internal/skill"
 )
 
@@ -22,6 +24,7 @@ func NewRootCommand() *cobra.Command {
 		Short: "Local project launcher for Windows",
 	}
 	root.AddCommand(newInitCommand())
+	root.AddCommand(newValidateCommand())
 	root.AddCommand(newProjectCommand())
 	root.AddCommand(newUICommand())
 	root.AddCommand(newSkillCommand())
@@ -47,6 +50,50 @@ func newInitCommand() *cobra.Command {
 	}
 }
 
+func newValidateCommand() *cobra.Command {
+	validateCmd := &cobra.Command{
+		Use:   "validate [manifest|state]",
+		Short: "Validate devlaunch files against the strict schema",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			target := runtime.ProjectTarget{Root: root}
+			kind := ""
+			if len(args) == 1 {
+				kind = args[0]
+			}
+			reports, err := runtime.ValidateProject(target)
+			if err != nil {
+				var validationErr schema.ValidationError
+				if errors.As(err, &validationErr) {
+					printValidationReport(cmd, validationErr.Report)
+					return err
+				}
+				if len(reports) > 0 {
+					for _, report := range reports {
+						printValidationReport(cmd, report)
+					}
+				}
+				return err
+			}
+			for _, report := range reports {
+				if kind != "" && report.DocumentType != kind {
+					continue
+				}
+				printValidationReport(cmd, report)
+			}
+			if kind == "state" && len(reports) == 1 && reports[0].DocumentType == "manifest" {
+				fmt.Fprintln(cmd.OutOrStdout(), "State file not found. This is allowed.")
+			}
+			return nil
+		},
+	}
+	return validateCmd
+}
+
 func newProjectCommand() *cobra.Command {
 	project := &cobra.Command{
 		Use:   "project",
@@ -66,19 +113,66 @@ func newProjectCommand() *cobra.Command {
 		},
 	})
 
-	project.AddCommand(targetedProjectCommand("start", "Start a project", runtime.Start))
-	project.AddCommand(targetedProjectCommand("stop", "Stop a project", runtime.Stop))
-	project.AddCommand(targetedProjectCommand("status", "Show project status", runtime.Status))
+	project.AddCommand(&cobra.Command{
+		Use:   "start [project-id]",
+		Short: "Start a project",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := resolveProjectTarget(args)
+			if err != nil {
+				return err
+			}
+			result, err := runtime.Start(target, runtime.ExecutionOptions{Interactive: true})
+			if err != nil {
+				return err
+			}
+			printProjectStatus(cmd, result)
+			return nil
+		},
+	})
+
+	project.AddCommand(&cobra.Command{
+		Use:   "stop [project-id]",
+		Short: "Stop a project",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := resolveProjectTarget(args)
+			if err != nil {
+				return err
+			}
+			result, err := runtime.Stop(target, runtime.ExecutionOptions{Interactive: true})
+			if err != nil {
+				return err
+			}
+			printProjectStatus(cmd, result)
+			return nil
+		},
+	})
+
+	project.AddCommand(&cobra.Command{
+		Use:   "status [project-id]",
+		Short: "Show project status",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := resolveProjectTarget(args)
+			if err != nil {
+				return err
+			}
+			result, err := runtime.Status(target)
+			if err != nil {
+				return err
+			}
+			printProjectStatus(cmd, result)
+			return nil
+		},
+	})
+
 	project.AddCommand(&cobra.Command{
 		Use:   "open [project-id]",
 		Short: "Open the project folder",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := ""
-			if len(args) == 1 {
-				id = args[0]
-			}
-			target, err := runtime.ResolveTarget(id)
+			target, err := resolveProjectTarget(args)
 			if err != nil {
 				return err
 			}
@@ -89,27 +183,28 @@ func newProjectCommand() *cobra.Command {
 	return project
 }
 
-func targetedProjectCommand(use, short string, run func(runtime.ProjectTarget) (runtime.ProjectStatus, error)) *cobra.Command {
-	return &cobra.Command{
-		Use:   use + " [project-id]",
-		Short: short,
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := ""
-			if len(args) == 1 {
-				id = args[0]
-			}
-			target, err := runtime.ResolveTarget(id)
-			if err != nil {
-				return err
-			}
-			result, err := run(target)
-			if err != nil {
-				return err
-			}
-			printProjectStatus(cmd, result)
-			return nil
-		},
+func resolveProjectTarget(args []string) (runtime.ProjectTarget, error) {
+	id := ""
+	if len(args) == 1 {
+		id = args[0]
+	}
+	return runtime.ResolveTarget(id)
+}
+
+func printValidationReport(cmd *cobra.Command, report schema.ValidationReport) {
+	out := cmd.OutOrStdout()
+	if report.Valid {
+		fmt.Fprintf(out, "%s validation OK\n", strings.Title(report.DocumentType))
+		fmt.Fprintf(out, "  version: %d\n", report.Version)
+		fmt.Fprintf(out, "  schema: %s\n", report.SchemaRef)
+		return
+	}
+	fmt.Fprintf(out, "%s validation failed\n", strings.Title(report.DocumentType))
+	fmt.Fprintf(out, "  version: %d\n", report.Version)
+	fmt.Fprintf(out, "  schema: %s\n", report.SchemaRef)
+	fmt.Fprintln(out, "  issues:")
+	for _, issue := range report.Issues {
+		fmt.Fprintf(out, "  - %s: %s\n", issue.Path, issue.Message)
 	}
 }
 
@@ -119,7 +214,6 @@ func printProjectList(cmd *cobra.Command, projects []registry.ProjectRecord) {
 		fmt.Fprintln(out, "No registered projects.")
 		return
 	}
-
 	fmt.Fprintln(out, "Registered projects")
 	for _, project := range projects {
 		fmt.Fprintf(out, "- %s\n", project.Name)
@@ -138,18 +232,30 @@ func printProjectStatus(cmd *cobra.Command, status runtime.ProjectStatus) {
 	fmt.Fprintf(out, "  status: %s\n", status.Status)
 	fmt.Fprintf(out, "  last start: %s\n", formatOptionalTime(status.LastStartAt))
 	fmt.Fprintf(out, "  last stop: %s\n", formatOptionalTime(status.LastStopAt))
+	if len(status.Warnings) > 0 {
+		fmt.Fprintln(out, "  warnings:")
+		for _, warning := range status.Warnings {
+			fmt.Fprintf(out, "  - %s\n", warning)
+		}
+	}
 	if len(status.Resources) == 0 {
 		fmt.Fprintln(out, "  resources: none")
 		return
 	}
-
 	fmt.Fprintln(out, "  resources:")
 	for _, resource := range status.Resources {
 		managed := "manual"
 		if resource.Managed {
 			managed = "managed"
 		}
-		fmt.Fprintf(out, "  - %s [%s] %s (%s)\n", resource.ID, resource.Type, resource.Status, managed)
+		line := fmt.Sprintf("  - %s [%s] %s (%s)", resource.ID, resource.Type, resource.Status, managed)
+		if resource.Diverged {
+			line += " (state mismatch)"
+		}
+		fmt.Fprintln(out, line)
+		if resource.ObservedBy != "" {
+			fmt.Fprintf(out, "    observed by: %s\n", resource.ObservedBy)
+		}
 	}
 }
 
@@ -164,7 +270,7 @@ func formatTime(value time.Time) string {
 	if value.IsZero() {
 		return "unknown"
 	}
-	return strings.ReplaceAll(value.Local().Format("2006-01-02 15:04:05"), "T", " ")
+	return value.Local().Format("2006-01-02 15:04:05")
 }
 
 func newUICommand() *cobra.Command {
@@ -172,7 +278,6 @@ func newUICommand() *cobra.Command {
 		Use:   "ui",
 		Short: "Control the local web UI",
 	}
-
 	ui.AddCommand(newUIStartCommand())
 	ui.AddCommand(newUIStopCommand())
 	return ui
@@ -196,11 +301,9 @@ func newUIStartCommand() *cobra.Command {
 				child.Stderr = os.Stderr
 				return child.Start()
 			}
-
 			return serveUI(cmd, port)
 		},
 	}
-
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Start the UI in the background")
 	cmd.Flags().IntVar(&port, "port", runtime.DefaultUIPort, "Port for the local web UI")
 	return cmd
@@ -208,7 +311,6 @@ func newUIStartCommand() *cobra.Command {
 
 func newUIStopCommand() *cobra.Command {
 	var port int
-
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the local web UI",
@@ -216,7 +318,6 @@ func newUIStopCommand() *cobra.Command {
 			return callControlEndpoint(port, "/__control/stop")
 		},
 	}
-
 	cmd.Flags().IntVar(&port, "port", runtime.DefaultUIPort, "Port for the local web UI")
 	return cmd
 }
@@ -232,7 +333,6 @@ func newSkillCommand() *cobra.Command {
 		Use:   "skill",
 		Short: "Manage the embedded skill",
 	}
-
 	skillCmd.AddCommand(&cobra.Command{
 		Use:   "install",
 		Short: "Install the local skill and proxy npx skills",
@@ -240,7 +340,6 @@ func newSkillCommand() *cobra.Command {
 			return skill.Install()
 		},
 	})
-
 	return skillCmd
 }
 

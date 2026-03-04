@@ -110,14 +110,24 @@ func (s *Server) handleProjectAction(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, status)
 	case r.Method == http.MethodPost && parts[2] == "start":
-		status, err := runtime.Start(target)
+		options, err := decodeExecutionOptions(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		status, err := runtime.Start(target, options)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, status)
 	case r.Method == http.MethodPost && parts[2] == "stop":
-		status, err := runtime.Stop(target)
+		options, err := decodeExecutionOptions(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		status, err := runtime.Stop(target, options)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -159,6 +169,22 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func decodeExecutionOptions(r *http.Request) (runtime.ExecutionOptions, error) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return runtime.ExecutionOptions{Interactive: false}, nil
+	}
+	defer r.Body.Close()
+	var options runtime.ExecutionOptions
+	if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+		return runtime.ExecutionOptions{}, err
+	}
+	options.Interactive = false
+	if options.Decisions == nil {
+		options.Decisions = map[string]bool{}
+	}
+	return options, nil
 }
 
 const indexHTML = `<!doctype html>
