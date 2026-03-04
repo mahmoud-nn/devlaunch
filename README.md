@@ -8,7 +8,7 @@ It provides:
 - a local SSR web UI served by the same Go binary
 - a runtime that reads `.devlaunch/manifest.json` and `.devlaunch/state.local.json`
 - embedded PowerShell scripts for Windows-specific execution
-- an embedded skill source that can still be installed through `npx skills`
+- a repo-hosted skill under `skills/devlaunch`
 
 ## Scope
 
@@ -145,7 +145,6 @@ go build -o .\bin\devlaunch.exe .\cmd\devlaunch
 The resulting binary embeds:
 
 - `scripts/ps1`
-- `skill`
 
 At runtime, `devlaunch` extracts them under:
 
@@ -155,11 +154,17 @@ At runtime, `devlaunch` extracts them under:
 
 ## Skill Install
 
-`devlaunch skill install` keeps the required behavior:
+The skill is published from this repository under:
 
-1. copy the embedded local skill from this repo
-2. place it in the user skill directory
-3. call `npx skills`
+```text
+skills/devlaunch
+```
+
+`devlaunch skill install` proxies:
+
+```text
+npx skills add mahmoud-nn/devlaunch -g --skill devlaunch
+```
 
 ## Notes
 
