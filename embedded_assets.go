@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed scripts/ps1/*.ps1
+//go:embed scripts/ps1/*.ps1 skills/devlaunch/references/*.json
 var embeddedFiles embed.FS
 
 func RuntimeDir() (string, error) {
@@ -44,4 +44,8 @@ func writeEmbeddedFile(sourcePath, targetPath string) error {
 		return err
 	}
 	return os.WriteFile(targetPath, data, 0o644)
+}
+
+func ReadEmbeddedFile(path string) ([]byte, error) {
+	return embeddedFiles.ReadFile(filepath.ToSlash(path))
 }
