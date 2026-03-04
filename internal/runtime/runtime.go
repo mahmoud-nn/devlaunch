@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/mahmoud-nn/devlaunch/internal/manifest"
 	"github.com/mahmoud-nn/devlaunch/internal/registry"
+	"github.com/mahmoud-nn/devlaunch/internal/schema"
 	"github.com/mahmoud-nn/devlaunch/internal/state"
 	"github.com/mahmoud-nn/devlaunch/internal/windows"
 )
@@ -25,11 +28,19 @@ type ProjectTarget struct {
 	Root string
 }
 
+type ExecutionOptions struct {
+	Interactive bool            `json:"interactive"`
+	Decisions   map[string]bool `json:"decisions,omitempty"`
+}
+
 type ResourceStatus struct {
-	ID      string       `json:"id"`
-	Type    string       `json:"type"`
-	Status  state.Status `json:"status"`
-	Managed bool         `json:"managed"`
+	ID          string       `json:"id"`
+	Type        string       `json:"type"`
+	Status      state.Status `json:"status"`
+	StateStatus state.Status `json:"stateStatus"`
+	Managed     bool         `json:"managed"`
+	Diverged    bool         `json:"diverged"`
+	ObservedBy  string       `json:"observedBy,omitempty"`
 }
 
 type ProjectStatus struct {
@@ -40,6 +51,18 @@ type ProjectStatus struct {
 	LastStartAt *time.Time       `json:"lastStartAt"`
 	LastStopAt  *time.Time       `json:"lastStopAt"`
 	Resources   []ResourceStatus `json:"resources"`
+	Warnings    []string         `json:"warnings,omitempty"`
+}
+
+type loadContext struct {
+	doc      manifest.Manifest
+	state    state.State
+	warnings []string
+}
+
+type observedStatus struct {
+	status     state.Status
+	observedBy string
 }
 
 func ResolveTarget(id string) (ProjectTarget, error) {
@@ -69,67 +92,43 @@ func InitProject(root string) (manifest.Manifest, state.State, error) {
 	if err != nil {
 		return manifest.Manifest{}, state.State{}, err
 	}
-
-	st, err := ensureState(root, doc.Project.Name)
+	st, _, err := ensureState(root, doc.Project.Name)
 	if err != nil {
 		return manifest.Manifest{}, state.State{}, err
 	}
-
 	if _, err := Register(root, registry.ProjectStatusStopped); err != nil {
 		return manifest.Manifest{}, state.State{}, err
 	}
-
 	return doc, st, nil
 }
 
-func ensureManifest(root, projectName string) (manifest.Manifest, error) {
-	path := manifest.ManifestPath(root)
-	if _, err := os.Stat(path); err == nil {
-		return manifest.Load(root)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return manifest.Manifest{}, err
+func ValidateProject(target ProjectTarget) ([]schema.ValidationReport, error) {
+	root := filepath.Clean(target.Root)
+	reports := []schema.ValidationReport{}
+
+	manifestBytes, err := os.ReadFile(manifest.ManifestPath(root))
+	if err != nil {
+		return nil, err
+	}
+	manifestReport, err := schema.ValidateManifestBytes(manifestBytes)
+	reports = append(reports, manifestReport)
+	if err != nil {
+		return reports, err
 	}
 
-	doc := manifest.Manifest{
-		Version: 1,
-		Project: manifest.Project{
-			Name:     projectName,
-			RootPath: root,
-			Platform: "windows",
-		},
-		Terminal: manifest.Terminal{
-			Engine:      "windows-terminal",
-			ReuseWindow: false,
-		},
-		Apps:     detectApps(),
-		Services: detectServices(root),
-	}
-	if err := manifest.Save(root, doc); err != nil {
-		return manifest.Manifest{}, err
-	}
-	return doc, nil
-}
-
-func ensureState(root, projectName string) (state.State, error) {
-	path := manifest.StatePath(root)
-	if _, err := os.Stat(path); err == nil {
-		st := state.Load(root, projectName)
-		if st.ProjectName == "" {
-			st.ProjectName = projectName
-			if err := state.Save(root, st); err != nil {
-				return state.State{}, err
-			}
+	stateBytes, err := os.ReadFile(manifest.StatePath(root))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return reports, nil
 		}
-		return st, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return state.State{}, err
+		return reports, err
 	}
-
-	st := state.Default(projectName)
-	if err := state.Save(root, st); err != nil {
-		return state.State{}, err
+	stateReport, err := schema.ValidateStateBytes(stateBytes)
+	reports = append(reports, stateReport)
+	if err != nil {
+		return reports, err
 	}
-	return st, nil
+	return reports, nil
 }
 
 func Register(root string, status registry.ProjectStatus) (registry.ProjectRecord, error) {
@@ -137,7 +136,6 @@ func Register(root string, status registry.ProjectStatus) (registry.ProjectRecor
 	if err != nil {
 		return registry.ProjectRecord{}, err
 	}
-
 	record := registry.ProjectRecord{
 		ID:              doc.Project.Name,
 		Name:            doc.Project.Name,
@@ -146,7 +144,6 @@ func Register(root string, status registry.ProjectStatus) (registry.ProjectRecor
 		LastSeenAt:      time.Now().UTC(),
 		LastKnownStatus: status,
 	}
-
 	reg, err := registry.Load()
 	if err != nil {
 		return registry.ProjectRecord{}, err
@@ -170,39 +167,47 @@ func ListProjects() ([]registry.ProjectRecord, error) {
 }
 
 func Status(target ProjectTarget) (ProjectStatus, error) {
-	doc, st, err := loadAndReconcile(target)
+	ctx, err := loadProject(target)
 	if err != nil {
 		return ProjectStatus{}, err
 	}
-	current := summarize(doc, st)
-	if _, err := Register(doc.Project.RootPath, registry.ProjectStatus(current.Status)); err != nil {
+	current := summarize(ctx.doc, ctx.state, ctx.warnings)
+	if _, err := Register(ctx.doc.Project.RootPath, registry.ProjectStatus(current.Status)); err != nil {
 		return ProjectStatus{}, err
 	}
 	return current, nil
 }
 
-func Start(target ProjectTarget) (ProjectStatus, error) {
-	doc, st, err := loadAndReconcile(target)
+func Start(target ProjectTarget, options ExecutionOptions) (ProjectStatus, error) {
+	ctx, err := loadProject(target)
 	if err != nil {
 		return ProjectStatus{}, err
 	}
 
-	appOrder, serviceOrder, err := dependencyOrder(doc)
+	appOrder, serviceOrder, err := dependencyOrder(ctx.doc)
 	if err != nil {
 		return ProjectStatus{}, err
 	}
 
 	for _, app := range appOrder {
-		if !app.Enabled || st.Resources[app.ID].Status == state.StatusRunning {
+		resource := ctx.state.Resources[app.ID]
+		if resource.Status == state.StatusRunning {
 			continue
 		}
-		result, err := startApp(doc.Project.RootPath, app)
+		shouldStart, err := resolveAction("start", "app", app.ID, app.StartPolicy, options, &ctx.warnings)
 		if err != nil {
-			st.Resources[app.ID] = failedResource("app")
-			_ = state.Save(doc.Project.RootPath, st)
+			return ProjectStatus{}, err
+		}
+		if !shouldStart {
+			continue
+		}
+		result, err := startApp(ctx.doc.Project.RootPath, app)
+		if err != nil {
+			ctx.state.Resources[app.ID] = failedResource("app")
+			_ = state.Save(ctx.doc.Project.RootPath, ctx.state)
 			return ProjectStatus{}, fmt.Errorf("start app %s: %w", app.ID, err)
 		}
-		st.Resources[app.ID] = state.ResourceState{
+		ctx.state.Resources[app.ID] = state.ResourceState{
 			Type:             "app",
 			Status:           state.StatusRunning,
 			StartedByRuntime: true,
@@ -212,16 +217,24 @@ func Start(target ProjectTarget) (ProjectStatus, error) {
 	}
 
 	for _, service := range serviceOrder {
-		if st.Resources[service.ID].Status == state.StatusRunning {
+		resource := ctx.state.Resources[service.ID]
+		if resource.Status == state.StatusRunning {
+			continue
+		}
+		shouldStart, err := resolveAction("start", "service", service.ID, service.StartPolicy, options, &ctx.warnings)
+		if err != nil {
+			return ProjectStatus{}, err
+		}
+		if !shouldStart {
 			continue
 		}
 		result, err := startService(service)
 		if err != nil {
-			st.Resources[service.ID] = failedResource("service")
-			_ = state.Save(doc.Project.RootPath, st)
+			ctx.state.Resources[service.ID] = failedResource("service")
+			_ = state.Save(ctx.doc.Project.RootPath, ctx.state)
 			return ProjectStatus{}, fmt.Errorf("start service %s: %w", service.ID, err)
 		}
-		resource := state.ResourceState{
+		next := state.ResourceState{
 			Type:             "service",
 			Status:           state.StatusRunning,
 			StartedByRuntime: true,
@@ -229,52 +242,92 @@ func Start(target ProjectTarget) (ProjectStatus, error) {
 			LastSeenAt:       time.Now().UTC(),
 		}
 		if service.TabName != nil {
-			resource.TerminalTabName = *service.TabName
+			next.TerminalTabName = *service.TabName
 		}
-		st.Resources[service.ID] = resource
+		ctx.state.Resources[service.ID] = next
 	}
 
 	now := time.Now().UTC()
-	st.LastStartAt = &now
-	if err := state.Save(doc.Project.RootPath, st); err != nil {
+	ctx.state.LastStartAt = &now
+	if err := state.Save(ctx.doc.Project.RootPath, ctx.state); err != nil {
 		return ProjectStatus{}, err
 	}
-	if _, err := Register(doc.Project.RootPath, registry.ProjectStatusRunning); err != nil {
+	result := summarize(ctx.doc, ctx.state, ctx.warnings)
+	if _, err := Register(ctx.doc.Project.RootPath, registry.ProjectStatus(result.Status)); err != nil {
 		return ProjectStatus{}, err
 	}
-	return summarize(doc, st), nil
+	return result, nil
 }
 
-func Stop(target ProjectTarget) (ProjectStatus, error) {
-	doc, st, err := loadAndReconcile(target)
+func Stop(target ProjectTarget, options ExecutionOptions) (ProjectStatus, error) {
+	ctx, err := loadProject(target)
 	if err != nil {
 		return ProjectStatus{}, err
 	}
 
-	for i := len(doc.Services) - 1; i >= 0; i-- {
-		service := doc.Services[i]
-		if err := stopService(service); err != nil {
-			st.Resources[service.ID] = failedResource("service")
-			_ = state.Save(doc.Project.RootPath, st)
+	for i := len(ctx.doc.Services) - 1; i >= 0; i-- {
+		service := ctx.doc.Services[i]
+		resource := ctx.state.Resources[service.ID]
+		if resource.Status == state.StatusStopped {
+			continue
+		}
+		shouldStop, err := resolveAction("stop", "service", service.ID, service.StopPolicy, options, &ctx.warnings)
+		if err != nil {
+			return ProjectStatus{}, err
+		}
+		if !shouldStop {
+			continue
+		}
+		if err := stopService(service, resource, &ctx.warnings); err != nil {
+			ctx.state.Resources[service.ID] = failedResource("service")
+			_ = state.Save(ctx.doc.Project.RootPath, ctx.state)
 			return ProjectStatus{}, fmt.Errorf("stop service %s: %w", service.ID, err)
 		}
-		st.Resources[service.ID] = state.ResourceState{
+		ctx.state.Resources[service.ID] = state.ResourceState{
 			Type:             "service",
 			Status:           state.StatusStopped,
-			StartedByRuntime: st.Resources[service.ID].StartedByRuntime,
+			StartedByRuntime: resource.StartedByRuntime,
+			TerminalTabName:  resource.TerminalTabName,
+			LastSeenAt:       time.Now().UTC(),
+		}
+	}
+
+	for i := len(ctx.doc.Apps) - 1; i >= 0; i-- {
+		app := ctx.doc.Apps[i]
+		resource := ctx.state.Resources[app.ID]
+		if resource.Status == state.StatusStopped {
+			continue
+		}
+		shouldStop, err := resolveAction("stop", "app", app.ID, app.StopPolicy, options, &ctx.warnings)
+		if err != nil {
+			return ProjectStatus{}, err
+		}
+		if !shouldStop {
+			continue
+		}
+		if err := stopApp(app, resource, &ctx.warnings); err != nil {
+			ctx.state.Resources[app.ID] = failedResource("app")
+			_ = state.Save(ctx.doc.Project.RootPath, ctx.state)
+			return ProjectStatus{}, fmt.Errorf("stop app %s: %w", app.ID, err)
+		}
+		ctx.state.Resources[app.ID] = state.ResourceState{
+			Type:             "app",
+			Status:           state.StatusStopped,
+			StartedByRuntime: resource.StartedByRuntime,
 			LastSeenAt:       time.Now().UTC(),
 		}
 	}
 
 	now := time.Now().UTC()
-	st.LastStopAt = &now
-	if err := state.Save(doc.Project.RootPath, st); err != nil {
+	ctx.state.LastStopAt = &now
+	if err := state.Save(ctx.doc.Project.RootPath, ctx.state); err != nil {
 		return ProjectStatus{}, err
 	}
-	if _, err := Register(doc.Project.RootPath, registry.ProjectStatusStopped); err != nil {
+	result := summarize(ctx.doc, ctx.state, ctx.warnings)
+	if _, err := Register(ctx.doc.Project.RootPath, registry.ProjectStatus(result.Status)); err != nil {
 		return ProjectStatus{}, err
 	}
-	return summarize(doc, st), nil
+	return result, nil
 }
 
 func OpenProjectFolder(target ProjectTarget) error {
@@ -284,45 +337,98 @@ func OpenProjectFolder(target ProjectTarget) error {
 	return windows.OpenFolder(target.Root)
 }
 
-func loadAndReconcile(target ProjectTarget) (manifest.Manifest, state.State, error) {
+func ensureManifest(root, projectName string) (manifest.Manifest, error) {
+	path := manifest.ManifestPath(root)
+	if _, err := os.Stat(path); err == nil {
+		return manifest.Load(root)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return manifest.Manifest{}, err
+	}
+	doc := manifest.Manifest{
+		Version: 1,
+		Project: manifest.Project{
+			Name:     projectName,
+			RootPath: root,
+			Platform: "windows",
+		},
+		Terminal: manifest.Terminal{
+			Engine:      "windows-terminal",
+			ReuseWindow: false,
+		},
+		Apps:     detectApps(),
+		Services: detectServices(root),
+	}
+	if err := manifest.Save(root, doc); err != nil {
+		return manifest.Manifest{}, err
+	}
+	return doc, nil
+}
+
+func ensureState(root, projectName string) (state.State, []string, error) {
+	path := manifest.StatePath(root)
+	if _, err := os.Stat(path); err == nil {
+		return state.Load(root, projectName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return state.State{}, nil, err
+	}
+	st := state.Default(projectName)
+	if err := state.Save(root, st); err != nil {
+		return state.State{}, nil, err
+	}
+	return st, nil, nil
+}
+
+func loadProject(target ProjectTarget) (loadContext, error) {
 	root := filepath.Clean(target.Root)
 	doc, err := manifest.Load(root)
 	if err != nil {
-		return manifest.Manifest{}, state.State{}, err
+		return loadContext{}, err
 	}
-	st := reconcile(doc, state.Load(root, doc.Project.Name))
+	st, warnings, err := state.Load(root, doc.Project.Name)
+	if err != nil {
+		return loadContext{}, err
+	}
+	st, warnings = reconcile(doc, st, warnings)
 	if err := state.Save(root, st); err != nil {
-		return manifest.Manifest{}, state.State{}, err
+		return loadContext{}, err
 	}
-	return doc, st, nil
+	return loadContext{doc: doc, state: st, warnings: warnings}, nil
 }
 
-func summarize(doc manifest.Manifest, st state.State) ProjectStatus {
+func summarize(doc manifest.Manifest, st state.State, warnings []string) ProjectStatus {
 	statusValue := "stopped"
 	resources := make([]ResourceStatus, 0, len(doc.Apps)+len(doc.Services))
 
 	for _, app := range doc.Apps {
 		resource := st.Resources[app.ID]
+		observed := observeApp(doc.Project.RootPath, app, resource)
 		resources = append(resources, ResourceStatus{
-			ID:      app.ID,
-			Type:    "app",
-			Status:  resource.Status,
-			Managed: resource.StartedByRuntime,
+			ID:          app.ID,
+			Type:        "app",
+			Status:      observed.status,
+			StateStatus: resource.Status,
+			Managed:     resource.StartedByRuntime,
+			Diverged:    observed.status != resource.Status,
+			ObservedBy:  observed.observedBy,
 		})
-		if resource.Status == state.StatusRunning {
+		if observed.status == state.StatusRunning {
 			statusValue = "running"
 		}
 	}
 
 	for _, service := range doc.Services {
 		resource := st.Resources[service.ID]
+		observed := observeService(service, resource)
 		resources = append(resources, ResourceStatus{
-			ID:      service.ID,
-			Type:    "service",
-			Status:  resource.Status,
-			Managed: resource.StartedByRuntime,
+			ID:          service.ID,
+			Type:        "service",
+			Status:      observed.status,
+			StateStatus: resource.Status,
+			Managed:     resource.StartedByRuntime,
+			Diverged:    observed.status != resource.Status,
+			ObservedBy:  observed.observedBy,
 		})
-		if resource.Status == state.StatusRunning {
+		if observed.status == state.StatusRunning {
 			statusValue = "running"
 		}
 	}
@@ -330,7 +436,6 @@ func summarize(doc manifest.Manifest, st state.State) ProjectStatus {
 	if len(resources) == 0 {
 		statusValue = "unknown"
 	}
-
 	return ProjectStatus{
 		ID:          doc.Project.Name,
 		Name:        doc.Project.Name,
@@ -339,43 +444,125 @@ func summarize(doc manifest.Manifest, st state.State) ProjectStatus {
 		LastStartAt: st.LastStartAt,
 		LastStopAt:  st.LastStopAt,
 		Resources:   resources,
+		Warnings:    warnings,
 	}
 }
 
-func reconcile(doc manifest.Manifest, st state.State) state.State {
+func reconcile(doc manifest.Manifest, st state.State, warnings []string) (state.State, []string) {
 	if st.Resources == nil {
 		st.Resources = map[string]state.ResourceState{}
 	}
-
 	for _, app := range doc.Apps {
 		resource := st.Resources[app.ID]
-		if resource.LastKnownPID > 0 && windows.IsProcessRunning(resource.LastKnownPID) {
-			resource.Status = state.StatusRunning
-		} else if resource.Status == state.StatusRunning {
-			resource.Status = state.StatusUnknown
-		} else if resource.Status == "" {
-			resource.Status = state.StatusStopped
-		}
+		observed := observeApp(doc.Project.RootPath, app, resource)
 		resource.Type = "app"
+		resource.Status = observed.status
 		resource.LastSeenAt = time.Now().UTC()
+		if observed.status != state.StatusRunning {
+			resource.LastKnownPID = 0
+		}
 		st.Resources[app.ID] = resource
 	}
-
 	for _, service := range doc.Services {
 		resource := st.Resources[service.ID]
-		if !service.Interactive && resource.LastKnownPID > 0 && windows.IsProcessRunning(resource.LastKnownPID) {
-			resource.Status = state.StatusRunning
-		} else if !service.Interactive && resource.Status == state.StatusRunning {
-			resource.Status = state.StatusUnknown
-		} else if resource.Status == "" {
-			resource.Status = state.StatusStopped
-		}
+		observed := observeService(service, resource)
 		resource.Type = "service"
+		resource.Status = observed.status
 		resource.LastSeenAt = time.Now().UTC()
+		if observed.status != state.StatusRunning {
+			resource.LastKnownPID = 0
+		}
 		st.Resources[service.ID] = resource
 	}
+	return st, warnings
+}
 
-	return st
+func observeApp(root string, app manifest.App, resource state.ResourceState) observedStatus {
+	if resource.LastKnownPID > 0 && windows.IsProcessRunning(resource.LastKnownPID) {
+		return observedStatus{status: state.StatusRunning, observedBy: "pid"}
+	}
+	return observeCheckGroup(root, app.Checks.Status)
+}
+
+func observeService(service manifest.Service, resource state.ResourceState) observedStatus {
+	if resource.LastKnownPID > 0 && windows.IsProcessRunning(resource.LastKnownPID) {
+		return observedStatus{status: state.StatusRunning, observedBy: "pid"}
+	}
+	return observeCheckGroup(service.WorkingDirectory, service.Checks.Status)
+}
+
+func observeCheckGroup(workingDir string, group manifest.CheckGroup) observedStatus {
+	results := make([]itemResult, 0, len(group.Items))
+	for _, item := range group.Items {
+		results = append(results, observeCheckItem(workingDir, item))
+	}
+	return aggregateCheckResults(group.Mode, results)
+}
+
+type itemResult struct {
+	success    bool
+	conclusive bool
+	source     string
+}
+
+func observeCheckItem(workingDir string, item manifest.CheckItem) itemResult {
+	switch item.Type {
+	case "command":
+		err := runCommandCheck(workingDir, item)
+		return itemResult{success: err == nil, conclusive: true, source: "command"}
+	case "port":
+		err := runPortCheck(item)
+		return itemResult{success: err == nil, conclusive: true, source: "port"}
+	case "process":
+		return itemResult{success: windows.ProcessExistsByName(item.Name), conclusive: true, source: "process"}
+	case "http":
+		err := runHTTPCheck(item)
+		return itemResult{success: err == nil, conclusive: true, source: "http"}
+	case "fixed-delay":
+		return itemResult{success: false, conclusive: false, source: "fixed-delay"}
+	default:
+		return itemResult{success: false, conclusive: false, source: item.Type}
+	}
+}
+
+func aggregateCheckResults(mode string, results []itemResult) observedStatus {
+	sources := make([]string, 0, len(results))
+	conclusiveFailures := 0
+	conclusiveSuccesses := 0
+	inconclusive := 0
+	for _, result := range results {
+		sources = append(sources, result.source)
+		if !result.conclusive {
+			inconclusive++
+			continue
+		}
+		if result.success {
+			conclusiveSuccesses++
+		} else {
+			conclusiveFailures++
+		}
+	}
+	observedBy := fmt.Sprintf("checks.%s(%s)", mode, strings.Join(sources, ","))
+	switch mode {
+	case "all":
+		if conclusiveFailures > 0 {
+			return observedStatus{status: state.StatusStopped, observedBy: observedBy}
+		}
+		if conclusiveSuccesses == len(results) {
+			return observedStatus{status: state.StatusRunning, observedBy: observedBy}
+		}
+		return observedStatus{status: state.StatusUnknown, observedBy: observedBy}
+	case "any":
+		if conclusiveSuccesses > 0 {
+			return observedStatus{status: state.StatusRunning, observedBy: observedBy}
+		}
+		if inconclusive > 0 {
+			return observedStatus{status: state.StatusUnknown, observedBy: observedBy}
+		}
+		return observedStatus{status: state.StatusStopped, observedBy: observedBy}
+	default:
+		return observedStatus{status: state.StatusUnknown, observedBy: "invalid-check-mode"}
+	}
 }
 
 func dependencyOrder(doc manifest.Manifest) ([]manifest.App, []manifest.Service, error) {
@@ -419,7 +606,6 @@ func dependencyOrder(doc manifest.Manifest) ([]manifest.App, []manifest.Service,
 		order = append(order, id)
 		return nil
 	}
-
 	for _, app := range doc.Apps {
 		if err := walk(app.ID); err != nil {
 			return nil, nil, err
@@ -430,7 +616,6 @@ func dependencyOrder(doc manifest.Manifest) ([]manifest.App, []manifest.Service,
 			return nil, nil, err
 		}
 	}
-
 	appOrder := []manifest.App{}
 	serviceOrder := []manifest.Service{}
 	for _, id := range order {
@@ -445,104 +630,234 @@ func dependencyOrder(doc manifest.Manifest) ([]manifest.App, []manifest.Service,
 }
 
 func startApp(root string, app manifest.App) (windows.CommandResult, error) {
+	var result windows.CommandResult
+	var err error
 	switch app.Launch.Strategy {
 	case "executable":
-		result, err := windows.LaunchExecutable(app.Launch.Path)
-		if err != nil {
-			return windows.CommandResult{}, err
-		}
-		if err := waitReadiness(root, app.Readiness); err != nil {
-			return windows.CommandResult{}, err
-		}
-		return result, nil
+		result, err = windows.LaunchExecutable(app.Launch.Path)
 	case "command":
-		result, err := windows.RunBackground(root, app.Launch.Command)
-		if err != nil {
-			return windows.CommandResult{}, err
-		}
-		if err := waitReadiness(root, app.Readiness); err != nil {
-			return windows.CommandResult{}, err
-		}
-		return result, nil
+		result, err = windows.RunBackground(root, app.Launch.Command)
 	default:
 		return windows.CommandResult{}, fmt.Errorf("unsupported app launch strategy %q", app.Launch.Strategy)
 	}
-}
-
-func startService(service manifest.Service) (windows.CommandResult, error) {
-	if service.StartWhen.DelayMS > 0 {
-		time.Sleep(time.Duration(service.StartWhen.DelayMS) * time.Millisecond)
-	}
-	if service.Interactive {
-		tabName := service.ID
-		if service.TabName != nil && *service.TabName != "" {
-			tabName = *service.TabName
-		}
-		if err := windows.LaunchInteractiveTab(service.WorkingDirectory, tabName, service.Command); err != nil {
-			return windows.CommandResult{}, err
-		}
-		if err := waitReadiness(service.WorkingDirectory, service.Readiness); err != nil {
-			return windows.CommandResult{}, err
-		}
-		return windows.CommandResult{}, nil
-	}
-
-	result, err := windows.RunBackground(service.WorkingDirectory, service.Command)
 	if err != nil {
 		return windows.CommandResult{}, err
 	}
-	if err := waitReadiness(service.WorkingDirectory, service.Readiness); err != nil {
+	if err := waitForCheckGroup(root, app.Checks.Start); err != nil {
 		return windows.CommandResult{}, err
 	}
 	return result, nil
 }
 
-func stopService(service manifest.Service) error {
-	if service.StopPolicy.Command == "" {
-		return nil
+func startService(service manifest.Service) (windows.CommandResult, error) {
+	var result windows.CommandResult
+	var err error
+	if service.Interactive {
+		tabName := service.ID
+		if service.TabName != nil && *service.TabName != "" {
+			tabName = *service.TabName
+		}
+		result, err = windows.LaunchInteractiveTab(service.WorkingDirectory, tabName, service.Command, service.ID)
+	} else {
+		result, err = windows.RunBackground(service.WorkingDirectory, service.Command)
 	}
-	return windows.RunForeground(service.WorkingDirectory, service.StopPolicy.Command)
+	if err != nil {
+		return windows.CommandResult{}, err
+	}
+	if err := waitForCheckGroup(service.WorkingDirectory, service.Checks.Start); err != nil {
+		return windows.CommandResult{}, err
+	}
+	return result, nil
 }
 
-func waitReadiness(workingDir string, readiness manifest.Readiness) error {
-	attempts := readiness.Retry.MaxAttempts
-	if attempts == 0 {
+func stopApp(app manifest.App, resource state.ResourceState, warnings *[]string) error {
+	if app.StopPolicy.Command != "" {
+		return windows.RunForeground("", app.StopPolicy.Command)
+	}
+	if app.Launch.Strategy == "command" && resource.StartedByRuntime && resource.LastKnownPID > 0 {
+		if err := windows.KillProcessTree(resource.LastKnownPID); err != nil && windows.IsProcessRunning(resource.LastKnownPID) {
+			return err
+		}
+		return nil
+	}
+	*warnings = append(*warnings, fmt.Sprintf("App %q has no configured stop command and was left running.", app.ID))
+	return nil
+}
+
+func stopService(service manifest.Service, resource state.ResourceState, warnings *[]string) error {
+	if service.StopPolicy.Command != "" {
+		if err := windows.RunForeground(service.WorkingDirectory, service.StopPolicy.Command); err != nil {
+			return err
+		}
+	}
+	if service.Interactive && resource.StartedByRuntime && resource.LastKnownPID > 0 {
+		if err := windows.KillProcessTree(resource.LastKnownPID); err != nil && windows.IsProcessRunning(resource.LastKnownPID) {
+			return err
+		}
+		return nil
+	}
+	if service.StopPolicy.Command == "" && !service.Interactive {
+		*warnings = append(*warnings, fmt.Sprintf("Service %q has no configured stop command and may still be running.", service.ID))
+	}
+	return nil
+}
+
+func waitForCheckGroup(workingDir string, group manifest.CheckGroup) error {
+	switch group.Mode {
+	case "all":
+		for _, item := range group.Items {
+			if err := waitForCheckItem(workingDir, item); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "any":
+		var lastErr error
+		for _, item := range group.Items {
+			if err := waitForCheckItem(workingDir, item); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr == nil {
+			lastErr = errors.New("no start checks configured")
+		}
+		return lastErr
+	default:
+		return fmt.Errorf("unsupported checks mode %q", group.Mode)
+	}
+}
+
+func waitForCheckItem(workingDir string, item manifest.CheckItem) error {
+	switch item.Type {
+	case "command":
+		return waitWithRetry(item.Retry, func() error {
+			return windows.RunCheck(resolveWorkingDir(workingDir, item.WorkingDirectory), item.Command)
+		})
+	case "port":
+		return runPortCheck(item)
+	case "process":
+		return waitWithRetry(retryOrDefault(item.Retry), func() error {
+			if windows.ProcessExistsByName(item.Name) {
+				return nil
+			}
+			return fmt.Errorf("process %s not ready", item.Name)
+		})
+	case "http":
+		return waitWithRetry(retryOrDefault(item.Retry), func() error { return runHTTPCheck(item) })
+	case "fixed-delay":
+		time.Sleep(time.Duration(item.DelayMS) * time.Millisecond)
+		return nil
+	default:
+		return fmt.Errorf("unsupported check type %q", item.Type)
+	}
+}
+
+func runCommandCheck(workingDir string, item manifest.CheckItem) error {
+	return windows.RunCheck(resolveWorkingDir(workingDir, item.WorkingDirectory), item.Command)
+}
+
+func runPortCheck(item manifest.CheckItem) error {
+	retry := retryOrDefault(item.Retry)
+	return windows.WaitForPort(item.Port, retry.MaxAttempts, time.Duration(retry.DelayMS)*time.Millisecond)
+}
+
+func runHTTPCheck(item manifest.CheckItem) error {
+	timeout := 2 * time.Second
+	if item.TimeoutMS > 0 {
+		timeout = time.Duration(item.TimeoutMS) * time.Millisecond
+	}
+	client := http.Client{Timeout: timeout}
+	resp, err := client.Get(item.URL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if len(item.ExpectStatus) == 0 {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		return fmt.Errorf("unexpected http status %d", resp.StatusCode)
+	}
+	for _, statusCode := range item.ExpectStatus {
+		if resp.StatusCode == statusCode {
+			return nil
+		}
+	}
+	return fmt.Errorf("unexpected http status %d", resp.StatusCode)
+}
+
+func waitWithRetry(retry *manifest.Retry, fn func() error) error {
+	actual := retry
+	if actual == nil {
+		actual = &manifest.Retry{MaxAttempts: 1, DelayMS: 0}
+	}
+	attempts := actual.MaxAttempts
+	if attempts <= 0 {
 		attempts = 1
 	}
-	delay := time.Duration(readiness.Retry.DelayMS) * time.Millisecond
-	if delay == 0 {
-		delay = 2 * time.Second
+	delay := time.Duration(actual.DelayMS) * time.Millisecond
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := fn(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i < attempts-1 && delay > 0 {
+			time.Sleep(delay)
+		}
 	}
+	return lastErr
+}
 
-	switch readiness.Type {
-	case "", "fixed-delay":
-		duration := readiness.DelayMS
-		if duration == 0 {
-			duration = 1000
-		}
-		time.Sleep(time.Duration(duration) * time.Millisecond)
-		return nil
-	case "command":
-		for i := 0; i < attempts; i++ {
-			if err := windows.RunCheck(workingDir, readiness.Command); err == nil {
-				return nil
-			}
-			time.Sleep(delay)
-		}
-		return fmt.Errorf("readiness command failed: %s", readiness.Command)
-	case "port":
-		return windows.WaitForPort(readiness.Port, attempts, delay)
-	case "process":
-		for i := 0; i < attempts; i++ {
-			if windows.ProcessExistsByName(readiness.Process) {
-				return nil
-			}
-			time.Sleep(delay)
-		}
-		return fmt.Errorf("process readiness failed: %s", readiness.Process)
-	default:
-		return fmt.Errorf("unsupported readiness type %q", readiness.Type)
+func resolveAction(action, kind, id string, policy manifest.Policy, options ExecutionOptions, warnings *[]string) (bool, error) {
+	decision, ok := normalizedDecision(policy.DefaultAction)
+	if ok {
+		return decision, nil
 	}
+	if policy.DefaultAction != "ask" {
+		return false, fmt.Errorf("unsupported %s policy for %s %q: %s", action, kind, id, policy.DefaultAction)
+	}
+	if explicit, ok := options.Decisions[id]; ok {
+		return explicit, nil
+	}
+	if !options.Interactive || !isInteractiveSession() {
+		*warnings = append(*warnings, fmt.Sprintf("Skipped %s for %s %q because confirmation was required.", action, kind, id))
+		return false, nil
+	}
+	return promptYesNo(fmt.Sprintf("%s %s %q now? [y/N]: ", strings.Title(action), kind, id))
+}
+
+func normalizedDecision(action string) (bool, bool) {
+	switch action {
+	case "", "always":
+		return true, true
+	case "never":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func promptYesNo(message string) (bool, error) {
+	fmt.Fprint(os.Stdout, message)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, os.ErrClosed) && !strings.Contains(err.Error(), "EOF") {
+		return false, err
+	}
+	value := strings.TrimSpace(strings.ToLower(line))
+	return value == "y" || value == "yes", nil
+}
+
+func isInteractiveSession() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 func detectApps() []manifest.App {
@@ -552,21 +867,27 @@ func detectApps() []manifest.App {
 			{
 				ID:        "docker-desktop",
 				Kind:      "desktop-app",
-				Enabled:   true,
 				DependsOn: []string{},
 				Launch: manifest.Launch{
 					Strategy: "executable",
 					Path:     dockerPath,
 				},
-				Readiness: manifest.Readiness{
-					Type:    "command",
-					Command: "docker info",
-					Retry: manifest.Retry{
-						MaxAttempts: 60,
-						DelayMS:     2000,
+				StartPolicy: manifest.Policy{DefaultAction: "always"},
+				StopPolicy:  manifest.Policy{DefaultAction: "ask"},
+				Checks: manifest.Checks{
+					Start: manifest.CheckGroup{
+						Mode: "all",
+						Items: []manifest.CheckItem{
+							{Type: "command", Command: "docker info", Retry: &manifest.Retry{MaxAttempts: 60, DelayMS: 2000}},
+						},
+					},
+					Status: manifest.CheckGroup{
+						Mode: "all",
+						Items: []manifest.CheckItem{
+							{Type: "command", Command: "docker info", Retry: &manifest.Retry{MaxAttempts: 1, DelayMS: 0}},
+						},
 					},
 				},
-				StopPolicy: manifest.StopPolicy{DefaultAction: "ask"},
 			},
 		}
 	}
@@ -585,9 +906,22 @@ func detectServices(root string) []manifest.Service {
 				WorkingDirectory: root,
 				Command:          "pnpm dev",
 				DependsOn:        []string{},
-				Readiness:        manifest.Readiness{Type: "fixed-delay", DelayMS: 2000},
-				StartWhen:        manifest.StartWhen{DelayMS: 0},
-				StopPolicy:       manifest.StopPolicy{DefaultAction: "ask"},
+				StartPolicy:      manifest.Policy{DefaultAction: "always"},
+				StopPolicy:       manifest.Policy{DefaultAction: "always"},
+				Checks: manifest.Checks{
+					Start: manifest.CheckGroup{
+						Mode: "all",
+						Items: []manifest.CheckItem{
+							{Type: "fixed-delay", DelayMS: 2000},
+						},
+					},
+					Status: manifest.CheckGroup{
+						Mode: "any",
+						Items: []manifest.CheckItem{
+							{Type: "process", Name: "node"},
+						},
+					},
+				},
 			},
 		}
 	}
@@ -602,17 +936,33 @@ func detectServices(root string) []manifest.Service {
 				WorkingDirectory: root,
 				Command:          "docker compose up -d",
 				DependsOn:        []string{"docker-desktop"},
-				Readiness:        manifest.Readiness{Type: "command", Command: "docker compose ps"},
-				StartWhen:        manifest.StartWhen{DelayMS: 0},
-				StopPolicy: manifest.StopPolicy{
-					DefaultAction: "ask",
-					Command:       "docker compose down",
+				StartPolicy:      manifest.Policy{DefaultAction: "always"},
+				StopPolicy:       manifest.Policy{DefaultAction: "always", Command: "docker compose down"},
+				Checks: manifest.Checks{
+					Start: manifest.CheckGroup{
+						Mode: "all",
+						Items: []manifest.CheckItem{
+							{Type: "command", Command: "docker compose ps", Retry: &manifest.Retry{MaxAttempts: 10, DelayMS: 1000}},
+						},
+					},
+					Status: manifest.CheckGroup{
+						Mode: "all",
+						Items: []manifest.CheckItem{
+							{Type: "command", Command: "docker compose ps", Retry: &manifest.Retry{MaxAttempts: 1, DelayMS: 0}},
+						},
+					},
 				},
 			},
 		}
 	}
-
 	return []manifest.Service{}
+}
+
+func resolveWorkingDir(defaultDir, override string) string {
+	if override != "" {
+		return override
+	}
+	return defaultDir
 }
 
 func failedResource(kind string) state.ResourceState {
@@ -621,4 +971,11 @@ func failedResource(kind string) state.ResourceState {
 		Status:     state.StatusFailed,
 		LastSeenAt: time.Now().UTC(),
 	}
+}
+
+func retryOrDefault(retry *manifest.Retry) *manifest.Retry {
+	if retry != nil {
+		return retry
+	}
+	return &manifest.Retry{MaxAttempts: 1, DelayMS: 0}
 }

@@ -2,11 +2,13 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/mahmoud-nn/devlaunch/internal/manifest"
+	"github.com/mahmoud-nn/devlaunch/internal/schema"
 )
 
 type Status string
@@ -43,18 +45,24 @@ func Default(projectName string) State {
 	}
 }
 
-func Load(root, projectName string) State {
-	data, err := os.ReadFile(manifest.StatePath(root))
+func Load(root, projectName string) (State, []string, error) {
+	path := manifest.StatePath(root)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return Default(projectName)
+		if os.IsNotExist(err) {
+			return Default(projectName), nil, nil
+		}
+		return State{}, nil, err
+	}
+	if _, err := schema.ValidateStateBytes(data); err != nil {
+		warnings := []string{fmt.Sprintf("State file %s is invalid and was ignored: %s", path, err.Error())}
+		return Default(projectName), warnings, nil
 	}
 
 	var doc State
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return Default(projectName)
-	}
-	if doc.Version == 0 {
-		doc.Version = 1
+		warnings := []string{fmt.Sprintf("State file %s could not be parsed and was ignored: %s", path, err.Error())}
+		return Default(projectName), warnings, nil
 	}
 	if doc.ProjectName == "" {
 		doc.ProjectName = projectName
@@ -62,7 +70,7 @@ func Load(root, projectName string) State {
 	if doc.Resources == nil {
 		doc.Resources = map[string]ResourceState{}
 	}
-	return doc
+	return doc, nil, nil
 }
 
 func Save(root string, doc State) error {
@@ -77,6 +85,9 @@ func Save(root string, doc State) error {
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
+		return err
+	}
+	if _, err := schema.ValidateStateBytes(data); err != nil {
 		return err
 	}
 	return os.WriteFile(manifest.StatePath(root), append(data, '\n'), 0o644)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,9 +56,33 @@ func LaunchExecutable(path string) (CommandResult, error) {
 	return CommandResult{PID: pid}, nil
 }
 
-func LaunchInteractiveTab(workingDir, tabName, command string) error {
-	_, err := runScript("launch-interactive-tab.ps1", workingDir, tabName, command)
-	return err
+func LaunchInteractiveTab(workingDir, tabName, command, resourceID string) (CommandResult, error) {
+	pidFile, err := interactivePIDFile(resourceID)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	_ = os.Remove(pidFile)
+	output, err := runScript("launch-interactive-tab.ps1", workingDir, tabName, command, pidFile)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return CommandResult{}, fmt.Errorf("parse interactive pid: %w", err)
+	}
+	return CommandResult{PID: pid}, nil
+}
+
+func KillProcessTree(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("taskkill %d: %w: %s", pid, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func IsProcessRunning(pid int) bool {
@@ -128,4 +153,21 @@ func buildCommand(script string, args ...string) (*exec.Cmd, error) {
 	}
 	baseArgs = append(baseArgs, args...)
 	return exec.Command("powershell", baseArgs...), nil
+}
+
+func interactivePIDFile(resourceID string) (string, error) {
+	root, err := devlaunchassets.RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, "pids")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sanitizeFileName(resourceID)+".pid"), nil
+}
+
+func sanitizeFileName(value string) string {
+	replacer := strings.NewReplacer("\\", "-", "/", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
+	return replacer.Replace(strings.TrimSpace(value))
 }
