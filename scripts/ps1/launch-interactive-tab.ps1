@@ -4,11 +4,13 @@ param(
   [Parameter(Mandatory = $true)][string]$Command
 )
 
-$location = $WorkingDirectory.Replace("'", "''")
-$composed = "Set-Location '$location'; $Command"
+$arguments = @("new-tab", "-d", $WorkingDirectory)
 
 if ([string]::IsNullOrWhiteSpace($TabName)) {
-  wt new-tab powershell -NoExit -Command $composed | Out-Null
-} else {
-  wt new-tab --title $TabName powershell -NoExit -Command $composed | Out-Null
+  $arguments += @("powershell", "-NoExit", "-Command", $Command)
 }
+else {
+  $arguments += @("--title", $TabName, "powershell", "-NoExit", "-Command", $Command)
+}
+
+& wt @arguments | Out-Null

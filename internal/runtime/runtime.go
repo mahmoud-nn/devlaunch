@@ -65,6 +65,31 @@ func InitProject(root string) (manifest.Manifest, state.State, error) {
 	root = filepath.Clean(root)
 	projectName := filepath.Base(root)
 
+	doc, err := ensureManifest(root, projectName)
+	if err != nil {
+		return manifest.Manifest{}, state.State{}, err
+	}
+
+	st, err := ensureState(root, doc.Project.Name)
+	if err != nil {
+		return manifest.Manifest{}, state.State{}, err
+	}
+
+	if _, err := Register(root, registry.ProjectStatusStopped); err != nil {
+		return manifest.Manifest{}, state.State{}, err
+	}
+
+	return doc, st, nil
+}
+
+func ensureManifest(root, projectName string) (manifest.Manifest, error) {
+	path := manifest.ManifestPath(root)
+	if _, err := os.Stat(path); err == nil {
+		return manifest.Load(root)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return manifest.Manifest{}, err
+	}
+
 	doc := manifest.Manifest{
 		Version: 1,
 		Project: manifest.Project{
@@ -79,21 +104,32 @@ func InitProject(root string) (manifest.Manifest, state.State, error) {
 		Apps:     detectApps(),
 		Services: detectServices(root),
 	}
-
 	if err := manifest.Save(root, doc); err != nil {
-		return manifest.Manifest{}, state.State{}, err
+		return manifest.Manifest{}, err
+	}
+	return doc, nil
+}
+
+func ensureState(root, projectName string) (state.State, error) {
+	path := manifest.StatePath(root)
+	if _, err := os.Stat(path); err == nil {
+		st := state.Load(root, projectName)
+		if st.ProjectName == "" {
+			st.ProjectName = projectName
+			if err := state.Save(root, st); err != nil {
+				return state.State{}, err
+			}
+		}
+		return st, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return state.State{}, err
 	}
 
 	st := state.Default(projectName)
 	if err := state.Save(root, st); err != nil {
-		return manifest.Manifest{}, state.State{}, err
+		return state.State{}, err
 	}
-
-	if _, err := Register(root, registry.ProjectStatusStopped); err != nil {
-		return manifest.Manifest{}, state.State{}, err
-	}
-
-	return doc, st, nil
+	return st, nil
 }
 
 func Register(root string, status registry.ProjectStatus) (registry.ProjectRecord, error) {

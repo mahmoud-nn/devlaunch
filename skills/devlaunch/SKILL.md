@@ -17,9 +17,10 @@ Order is mandatory:
 2. Ask how they usually launch the project day to day.
 3. Ask which tools should stay open or be treated as optional.
 4. Only after that, inspect the repository to confirm and complete the picture.
-5. Generate `.devlaunch/manifest.json`.
-6. Generate `.devlaunch/state.local.json`.
-7. Register the project through `devlaunch init` or the runtime.
+5. If the repo is not initialized yet, run `devlaunch init` first to create the baseline files.
+6. Then adapt `.devlaunch/manifest.json` and `.devlaunch/state.local.json`.
+7. Never generate custom config first and run `devlaunch init` after.
+8. Register the project through `devlaunch init` or the runtime.
 
 ## Questions To Ask First
 
@@ -64,9 +65,10 @@ Check the local assets before generating the final output.
 
 1. Capture the real developer workflow first.
 2. Confirm it against the repository.
-3. Generate `.devlaunch/manifest.json`.
-4. Generate `.devlaunch/state.local.json`.
-5. Register the project through `devlaunch init` or the runtime.
+3. Run `devlaunch init` first when `.devlaunch` is missing.
+4. Adapt `.devlaunch/manifest.json`.
+5. Adapt `.devlaunch/state.local.json`.
+6. Register the project through `devlaunch init` or the runtime.
 
 ## Constraints
 
@@ -76,3 +78,4 @@ Check the local assets before generating the final output.
 - The shell is PowerShell.
 - Keep the manifest aligned with the runtime schema.
 - Prefer explicit developer answers over inference when defining startup flow.
+- `devlaunch init` must be treated as safe on existing projects and must not silently destroy existing `.devlaunch` files.

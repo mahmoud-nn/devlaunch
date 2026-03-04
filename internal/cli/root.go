@@ -2,15 +2,16 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/mahmoud-nn/devlaunch/internal/registry"
 	"github.com/mahmoud-nn/devlaunch/internal/runtime"
 	"github.com/mahmoud-nn/devlaunch/internal/skill"
 )
@@ -60,9 +61,8 @@ func newProjectCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(projects)
+			printProjectList(cmd, projects)
+			return nil
 		},
 	})
 
@@ -107,11 +107,64 @@ func targetedProjectCommand(use, short string, run func(runtime.ProjectTarget) (
 			if err != nil {
 				return err
 			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			printProjectStatus(cmd, result)
+			return nil
 		},
 	}
+}
+
+func printProjectList(cmd *cobra.Command, projects []registry.ProjectRecord) {
+	out := cmd.OutOrStdout()
+	if len(projects) == 0 {
+		fmt.Fprintln(out, "No registered projects.")
+		return
+	}
+
+	fmt.Fprintln(out, "Registered projects")
+	for _, project := range projects {
+		fmt.Fprintf(out, "- %s\n", project.Name)
+		fmt.Fprintf(out, "  id: %s\n", project.ID)
+		fmt.Fprintf(out, "  path: %s\n", project.RootPath)
+		fmt.Fprintf(out, "  status: %s\n", project.LastKnownStatus)
+		fmt.Fprintf(out, "  last seen: %s\n", formatTime(project.LastSeenAt))
+	}
+}
+
+func printProjectStatus(cmd *cobra.Command, status runtime.ProjectStatus) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Project %s\n", status.Name)
+	fmt.Fprintf(out, "  id: %s\n", status.ID)
+	fmt.Fprintf(out, "  path: %s\n", status.RootPath)
+	fmt.Fprintf(out, "  status: %s\n", status.Status)
+	fmt.Fprintf(out, "  last start: %s\n", formatOptionalTime(status.LastStartAt))
+	fmt.Fprintf(out, "  last stop: %s\n", formatOptionalTime(status.LastStopAt))
+	if len(status.Resources) == 0 {
+		fmt.Fprintln(out, "  resources: none")
+		return
+	}
+
+	fmt.Fprintln(out, "  resources:")
+	for _, resource := range status.Resources {
+		managed := "manual"
+		if resource.Managed {
+			managed = "managed"
+		}
+		fmt.Fprintf(out, "  - %s [%s] %s (%s)\n", resource.ID, resource.Type, resource.Status, managed)
+	}
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "never"
+	}
+	return formatTime(*value)
+}
+
+func formatTime(value time.Time) string {
+	if value.IsZero() {
+		return "unknown"
+	}
+	return strings.ReplaceAll(value.Local().Format("2006-01-02 15:04:05"), "T", " ")
 }
 
 func newUICommand() *cobra.Command {
