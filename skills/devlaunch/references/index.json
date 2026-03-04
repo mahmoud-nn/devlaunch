@@ -1,0 +1,8 @@
+{
+  "manifest": {
+    "1": "manifest.v1.schema.json"
+  },
+  "state": {
+    "1": "state.v1.schema.json"
+  }
+}

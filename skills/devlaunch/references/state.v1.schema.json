@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devlaunch/state/v1",
+  "title": "devlaunch state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "projectName", "lastStartAt", "lastStopAt", "resources"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "projectName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lastStartAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "lastStopAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/resourceState" }
+    }
+  },
+  "$defs": {
+    "resourceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "status", "startedByRuntime"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["app", "service"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["running", "stopped", "unknown", "failed"]
+        },
+        "startedByRuntime": {
+          "type": "boolean"
+        },
+        "lastKnownPid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "terminalTabName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}
